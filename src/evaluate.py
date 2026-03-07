@@ -56,15 +56,31 @@ def _plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, model_name: s
     plt.close()
 
 
-def _plot_feature_importance(model: Any, output_path: Path, title: str) -> None:
+def _build_metadata_sbert_feature_labels(feature_info: dict[str, Any]) -> list[str]:
+    metadata_columns = feature_info["metadata_columns"]
+    metadata_count = len(metadata_columns)
+    total_count = int(feature_info["metadata_sbert_shape"][1])
+    sbert_count = total_count - metadata_count
+    if sbert_count < 0:
+        raise ValueError("Invalid feature_info: metadata_sbert_shape is smaller than metadata column count")
+    sbert_labels = [f"sbert_dim_{idx}" for idx in range(sbert_count)]
+    return [*metadata_columns, *sbert_labels]
+
+
+def _plot_named_feature_importance(
+    model: Any, feature_labels: list[str], output_path: Path, title: str
+) -> None:
     importances = np.asarray(model.feature_importances_, dtype=float)
+    if len(importances) != len(feature_labels):
+        raise ValueError("Feature importance length does not match feature label count")
+
     top_k = min(20, len(importances))
     top_indices = np.argsort(importances)[::-1][:top_k]
     top_values = importances[top_indices]
-    labels = [f"feature_{idx}" for idx in top_indices]
+    top_labels = [feature_labels[idx] for idx in top_indices]
 
     plt.figure(figsize=(10, 6))
-    sns.barplot(x=top_values, y=labels, orient="h")
+    sns.barplot(x=top_values, y=top_labels, orient="h")
     plt.title(title)
     plt.tight_layout()
     plt.savefig(output_path, dpi=160)
@@ -94,6 +110,9 @@ def evaluate_models() -> dict[str, Any]:
 
     payload = joblib.load(settings.models_path)
     processed = pd.read_csv(settings.processed_data_path)
+    with (settings.features_dir / "feature_info.json").open("r", encoding="utf-8") as handle:
+        feature_info = json.load(handle)
+    metadata_sbert_labels = _build_metadata_sbert_feature_labels(feature_info)
 
     class_rows: list[dict[str, Any]] = []
     reg_rows: list[dict[str, Any]] = []
@@ -149,13 +168,15 @@ def evaluate_models() -> dict[str, Any]:
 
     xgb_cls = payload["classification"]["models"]["xgb_classifier_metadata_sbert"]
     xgb_reg = payload["regression"]["models"]["xgb_regressor_metadata_sbert"]
-    _plot_feature_importance(
+    _plot_named_feature_importance(
         xgb_cls,
+        metadata_sbert_labels,
         settings.results_dir / "feature_importance_xgb_classifier.png",
         "Top Feature Importances (XGBoost Classifier)",
     )
-    _plot_feature_importance(
+    _plot_named_feature_importance(
         xgb_reg,
+        metadata_sbert_labels,
         settings.results_dir / "feature_importance_xgb_regressor.png",
         "Top Feature Importances (XGBoost Regressor)",
     )

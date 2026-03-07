@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -68,6 +69,16 @@ class LaunchRecord:
     media_count: int
 
 
+@dataclass
+class WindowState:
+    posted_after: str
+    posted_before: str
+    cap: int
+    collected: int = 0
+    cursor: str | None = None
+    has_next_page: bool = True
+
+
 def _request_posts(
     endpoint: str,
     token: str,
@@ -90,9 +101,10 @@ def _request_posts(
         },
     }
 
-    retries = 5
+    retries = 12
     for attempt in range(1, retries + 1):
         response: Response = requests.post(endpoint, headers=headers, json=payload, timeout=60)
+        time.sleep(0.2)
         if response.status_code == 200:
             data = response.json()
             if "errors" in data:
@@ -112,6 +124,15 @@ def _request_posts(
                 reset_in = float(retry_after) if retry_after else 60.0
             sleep_seconds = max(float(reset_in), 1.0) + 2.0
             print(f"Rate limit reached. Waiting {int(sleep_seconds)} seconds before retrying...")
+            time.sleep(sleep_seconds)
+            continue
+
+        if response.status_code == 403 and "Just a moment" in response.text:
+            sleep_seconds = min(120 * attempt, 900)
+            print(
+                f"Temporary anti-bot challenge encountered (403). "
+                f"Waiting {int(sleep_seconds)} seconds before retrying..."
+            )
             time.sleep(sleep_seconds)
             continue
 
@@ -151,43 +172,107 @@ def _flatten_node(node: dict[str, Any]) -> LaunchRecord:
     )
 
 
+def _parse_iso_utc(raw_value: str) -> datetime:
+    return datetime.fromisoformat(raw_value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _format_iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_windows(posted_after: str, posted_before: str, target: int, months_per_window: int) -> list[WindowState]:
+    if months_per_window <= 0:
+        raise ValueError("months_per_window must be > 0")
+
+    start = _parse_iso_utc(posted_after)
+    end = _parse_iso_utc(posted_before)
+    if start >= end:
+        raise ValueError("POSTED_AFTER must be earlier than POSTED_BEFORE")
+
+    windows: list[tuple[datetime, datetime]] = []
+    cursor = start
+    while cursor < end:
+        window_end = min(cursor + timedelta(days=30 * months_per_window), end)
+        windows.append((cursor, window_end))
+        cursor = window_end
+
+    cap_base = target // len(windows)
+    remainder = target % len(windows)
+
+    window_states: list[WindowState] = []
+    for idx, (window_start, window_end) in enumerate(windows):
+        cap = cap_base + (1 if idx < remainder else 0)
+        window_states.append(
+            WindowState(
+                posted_after=_format_iso_utc(window_start),
+                posted_before=_format_iso_utc(window_end),
+                cap=cap,
+            )
+        )
+    return window_states
+
+
 def collect_posts(max_posts: int | None = None) -> pd.DataFrame:
     settings = load_settings()
     ensure_directories(settings)
 
     target = max_posts if max_posts is not None else settings.max_posts
     records: list[LaunchRecord] = []
-    cursor: str | None = None
+    seen_post_ids: set[str] = set()
+    windows = _build_windows(
+        posted_after=settings.posted_after,
+        posted_before=settings.posted_before,
+        target=target,
+        months_per_window=3,
+    )
 
     progress = tqdm(total=target, desc="Collecting posts", unit="post")
     while len(records) < target:
-        posts = _request_posts(
-            endpoint=settings.graphql_endpoint,
-            token=settings.product_hunt_token,
-            first=settings.page_size,
-            posted_after=settings.posted_after,
-            posted_before=settings.posted_before,
-            after=cursor,
-        )
-
-        edges = posts["edges"]
-        if not edges:
-            break
-
-        for edge in edges:
-            records.append(_flatten_node(edge["node"]))
-            progress.update(1)
+        any_progress = False
+        for window in windows:
             if len(records) >= target:
                 break
+            if not window.has_next_page or window.collected >= window.cap:
+                continue
 
-        if len(records) % 200 == 0:
-            checkpoint = pd.DataFrame([asdict(record) for record in records])
-            checkpoint.to_csv(settings.raw_data_path, index=False)
+            posts = _request_posts(
+                endpoint=settings.graphql_endpoint,
+                token=settings.product_hunt_token,
+                first=settings.page_size,
+                posted_after=window.posted_after,
+                posted_before=window.posted_before,
+                after=window.cursor,
+            )
 
-        page_info = posts["pageInfo"]
-        if not page_info["hasNextPage"] or len(records) >= target:
+            edges = posts["edges"]
+            if not edges:
+                window.has_next_page = False
+                continue
+
+            for edge in edges:
+                node = edge["node"]
+                post_id = node["id"]
+                if post_id in seen_post_ids:
+                    continue
+                seen_post_ids.add(post_id)
+                records.append(_flatten_node(node))
+                window.collected += 1
+                progress.update(1)
+                any_progress = True
+
+                if len(records) % 200 == 0:
+                    checkpoint = pd.DataFrame([asdict(record) for record in records])
+                    checkpoint.to_csv(settings.raw_data_path, index=False)
+
+                if len(records) >= target or window.collected >= window.cap:
+                    break
+
+            page_info = posts["pageInfo"]
+            window.has_next_page = bool(page_info["hasNextPage"])
+            window.cursor = page_info["endCursor"]
+
+        if not any_progress:
             break
-        cursor = page_info["endCursor"]
 
     progress.close()
     frame = pd.DataFrame([asdict(record) for record in records])
