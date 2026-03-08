@@ -12,6 +12,7 @@ import pandas as pd
 import seaborn as sns
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
+    RocCurveDisplay,
     f1_score,
     mean_absolute_error,
     precision_score,
@@ -53,6 +54,22 @@ def _plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, model_name: s
     disp.ax_.set_title(f"Confusion Matrix: {model_name}")
     plt.tight_layout()
     plt.savefig(results_dir / f"confusion_matrix_{model_name}.png", dpi=160)
+    plt.close()
+
+
+def _plot_roc_curves(predictions: dict[str, Any], results_dir: Path) -> None:
+    plt.figure(figsize=(8, 6))
+    axis = plt.gca()
+    for model_name, result in predictions.items():
+        RocCurveDisplay.from_predictions(
+            y_true=np.asarray(result["y_true"]),
+            y_score=np.asarray(result["y_score"]),
+            name=model_name,
+            ax=axis,
+        )
+    plt.title("ROC Curves by Classification Model")
+    plt.tight_layout()
+    plt.savefig(results_dir / "roc_curves.png", dpi=160)
     plt.close()
 
 
@@ -98,9 +115,11 @@ def _daily_mean_baseline(processed: pd.DataFrame, train_idx: np.ndarray, test_id
     baseline_pred = test["launch_date"].map(daily_means).fillna(global_mean).to_numpy(dtype=float)
     y_true = test["votes_count"].to_numpy(dtype=float)
 
+    baseline_pred_clipped = np.clip(baseline_pred, a_min=0.0, a_max=None)
     return {
         "r2": float(r2_score(y_true, baseline_pred)),
         "mae": float(mean_absolute_error(y_true, baseline_pred)),
+        "r2_log": float(r2_score(np.log1p(y_true), np.log1p(baseline_pred_clipped))),
     }
 
 
@@ -134,11 +153,20 @@ def evaluate_models() -> dict[str, Any]:
     for model_name, result in payload["regression"]["predictions"].items():
         y_true = np.asarray(result["y_true"], dtype=float)
         y_pred = np.asarray(result["y_pred"], dtype=float)
+        y_true_log = np.asarray(
+            result.get("y_true_log", np.log1p(np.clip(y_true, a_min=0.0, a_max=None))),
+            dtype=float,
+        )
+        y_pred_log = np.asarray(
+            result.get("y_pred_log", np.log1p(np.clip(y_pred, a_min=0.0, a_max=None))),
+            dtype=float,
+        )
         reg_rows.append(
             {
                 "model": model_name,
                 "r2": float(r2_score(y_true, y_pred)),
                 "mae": float(mean_absolute_error(y_true, y_pred)),
+                "r2_log": float(r2_score(y_true_log, y_pred_log)),
             }
         )
 
@@ -155,6 +183,7 @@ def evaluate_models() -> dict[str, Any]:
     class_df.to_csv(settings.results_dir / "classification_metrics.csv", index=False)
     reg_df.to_csv(settings.results_dir / "regression_metrics.csv", index=False)
     _plot_classification_metrics(class_df, settings.results_dir)
+    _plot_roc_curves(payload["classification"]["predictions"], settings.results_dir)
     _plot_regression_metrics(reg_df, settings.results_dir)
 
     best_class = class_df.iloc[0]["model"]

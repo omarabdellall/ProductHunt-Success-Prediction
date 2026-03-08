@@ -33,6 +33,7 @@ def _load_features() -> dict[str, Any]:
         "metadata_sbert": np.load(settings.features_dir / "metadata_sbert.npy"),
         "y_class": np.load(settings.features_dir / "y_class.npy"),
         "y_reg": np.load(settings.features_dir / "y_reg.npy"),
+        "y_reg_log": np.load(settings.features_dir / "y_reg_log.npy"),
     }
 
 
@@ -135,48 +136,56 @@ def _fit_regression_models(
     features: dict[str, Any], train_idx: np.ndarray, test_idx: np.ndarray, random_state: int
 ) -> dict[str, Any]:
     y_reg = features["y_reg"]
+    y_reg_log = features["y_reg_log"]
     cv = KFold(n_splits=5, shuffle=True, random_state=random_state)
     models: dict[str, Any] = {}
     predictions: dict[str, Any] = {}
 
-    split_meta = _build_split(features["metadata_only"], y_reg, train_idx, test_idx)
+    split_meta_log = _build_split(features["metadata_only"], y_reg_log, train_idx, test_idx)
     linear = LinearRegression()
-    linear.fit(split_meta.x_train, split_meta.y_train)
+    linear.fit(split_meta_log.x_train, split_meta_log.y_train)
+    linear_pred_log = linear.predict(split_meta_log.x_test)
     models["linear_metadata_only"] = linear
     predictions["linear_metadata_only"] = {
-        "y_true": split_meta.y_test,
-        "y_pred": linear.predict(split_meta.x_test),
+        "y_true_log": split_meta_log.y_test,
+        "y_pred_log": linear_pred_log,
+        "y_true": y_reg[test_idx],
+        "y_pred": np.clip(np.expm1(linear_pred_log), a_min=0.0, a_max=None),
     }
 
     for feature_name in ("metadata_tfidf", "metadata_sbert"):
-        split = _build_split(features[feature_name], y_reg, train_idx, test_idx)
+        split = _build_split(features[feature_name], y_reg_log, train_idx, test_idx)
         ridge_search = GridSearchCV(
             estimator=Ridge(random_state=random_state),
-            param_grid={"alpha": [0.1, 1.0, 5.0, 10.0, 20.0]},
+            param_grid={"alpha": [0.01, 0.1, 1.0, 10.0, 50.0, 100.0]},
             scoring="r2",
             cv=cv,
             n_jobs=-1,
         )
         ridge_search.fit(split.x_train, split.y_train)
         ridge = ridge_search.best_estimator_
+        ridge_pred_log = ridge.predict(split.x_test)
         model_name = f"ridge_{feature_name}"
         models[model_name] = ridge
         predictions[model_name] = {
-            "y_true": split.y_test,
-            "y_pred": ridge.predict(split.x_test),
+            "y_true_log": split.y_test,
+            "y_pred_log": ridge_pred_log,
+            "y_true": y_reg[test_idx],
+            "y_pred": np.clip(np.expm1(ridge_pred_log), a_min=0.0, a_max=None),
             "best_params": ridge_search.best_params_,
         }
 
-    split_sbert = _build_split(features["metadata_sbert"], y_reg, train_idx, test_idx)
+    split_sbert = _build_split(features["metadata_sbert"], y_reg_log, train_idx, test_idx)
     xgb_search = GridSearchCV(
         estimator=XGBRegressor(
             objective="reg:squarederror",
             random_state=random_state,
         ),
         param_grid={
-            "max_depth": [4, 6],
-            "n_estimators": [150, 300],
-            "learning_rate": [0.05, 0.1],
+            "max_depth": [3, 5, 7],
+            "n_estimators": [200, 400],
+            "learning_rate": [0.01, 0.05, 0.1],
+            "subsample": [0.8, 1.0],
         },
         scoring="r2",
         cv=cv,
@@ -184,10 +193,13 @@ def _fit_regression_models(
     )
     xgb_search.fit(split_sbert.x_train, split_sbert.y_train)
     xgb_reg = xgb_search.best_estimator_
+    xgb_pred_log = xgb_reg.predict(split_sbert.x_test)
     models["xgb_regressor_metadata_sbert"] = xgb_reg
     predictions["xgb_regressor_metadata_sbert"] = {
-        "y_true": split_sbert.y_test,
-        "y_pred": xgb_reg.predict(split_sbert.x_test),
+        "y_true_log": split_sbert.y_test,
+        "y_pred_log": xgb_pred_log,
+        "y_true": y_reg[test_idx],
+        "y_pred": np.clip(np.expm1(xgb_pred_log), a_min=0.0, a_max=None),
         "best_params": xgb_search.best_params_,
     }
     return {"models": models, "predictions": predictions}

@@ -60,12 +60,14 @@ def build_features() -> dict[str, Any]:
 
     labels_class = frame["is_top20"].to_numpy(dtype=int)
     labels_reg = frame["votes_count"].to_numpy(dtype=float)
+    labels_reg_log = np.log1p(labels_reg)
 
     _save_dense_matrix(settings.features_dir / "metadata_only.npy", metadata_scaled.astype(np.float32))
     _save_sparse_matrix(settings.features_dir / "metadata_tfidf.npz", metadata_tfidf)
     _save_dense_matrix(settings.features_dir / "metadata_sbert.npy", metadata_sbert.astype(np.float32))
     _save_dense_matrix(settings.features_dir / "y_class.npy", labels_class)
     _save_dense_matrix(settings.features_dir / "y_reg.npy", labels_reg)
+    _save_dense_matrix(settings.features_dir / "y_reg_log.npy", labels_reg_log)
 
     feature_info = {
         "metadata_columns": METADATA_COLUMNS,

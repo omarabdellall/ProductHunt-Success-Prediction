@@ -223,7 +223,7 @@ def collect_posts(max_posts: int | None = None) -> pd.DataFrame:
         posted_after=settings.posted_after,
         posted_before=settings.posted_before,
         target=target,
-        months_per_window=3,
+        months_per_window=1,
     )
 
     progress = tqdm(total=target, desc="Collecting posts", unit="post")
