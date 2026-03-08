@@ -41,9 +41,9 @@ def _plot_classification_metrics(metrics_df: pd.DataFrame, results_dir: Path) ->
 
 def _plot_regression_metrics(metrics_df: pd.DataFrame, results_dir: Path) -> None:
     plt.figure(figsize=(10, 5))
-    sns.barplot(data=metrics_df, x="model", y="r2")
+    sns.barplot(data=metrics_df, x="model", y="r2_log")
     plt.xticks(rotation=35, ha="right")
-    plt.title("Regression R-squared by Model")
+    plt.title("Regression Log-Scale R-squared by Model")
     plt.tight_layout()
     plt.savefig(results_dir / "regression_r2.png", dpi=160)
     plt.close()
@@ -178,7 +178,7 @@ def evaluate_models() -> dict[str, Any]:
     reg_rows.append({"model": "daily_mean_baseline", **daily_baseline})
 
     class_df = pd.DataFrame(class_rows).sort_values("roc_auc", ascending=False)
-    reg_df = pd.DataFrame(reg_rows).sort_values("r2", ascending=False)
+    reg_df = pd.DataFrame(reg_rows).sort_values("r2_log", ascending=False)
 
     class_df.to_csv(settings.results_dir / "classification_metrics.csv", index=False)
     reg_df.to_csv(settings.results_dir / "regression_metrics.csv", index=False)
@@ -196,7 +196,10 @@ def evaluate_models() -> dict[str, Any]:
     )
 
     xgb_cls = payload["classification"]["models"]["xgb_classifier_metadata_sbert"]
-    xgb_reg = payload["regression"]["models"]["xgb_regressor_metadata_sbert"]
+    xgb_reg_model_name = "xgb_huber_regressor_metadata_sbert"
+    if xgb_reg_model_name not in payload["regression"]["models"]:
+        xgb_reg_model_name = "xgb_regressor_metadata_sbert"
+    xgb_reg = payload["regression"]["models"][xgb_reg_model_name]
     _plot_named_feature_importance(
         xgb_cls,
         metadata_sbert_labels,
@@ -207,13 +210,13 @@ def evaluate_models() -> dict[str, Any]:
         xgb_reg,
         metadata_sbert_labels,
         settings.results_dir / "feature_importance_xgb_regressor.png",
-        "Top Feature Importances (XGBoost Regressor)",
+        f"Top Feature Importances ({xgb_reg_model_name})",
     )
 
     metrics = {
         "classification": class_df.to_dict(orient="records"),
         "regression": reg_df.to_dict(orient="records"),
-        "targets": {"roc_auc": 0.70, "r2": 0.30},
+        "targets": {"roc_auc": 0.70, "r2_log": 0.30},
     }
     _save_json(settings.metrics_path, metrics)
     return metrics

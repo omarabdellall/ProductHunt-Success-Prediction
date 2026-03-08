@@ -20,6 +20,7 @@ METADATA_COLUMNS = [
     "hour",
     "day_of_week",
     "month",
+    "year",
     "maker_count",
     "media_count",
     "tagline_length",

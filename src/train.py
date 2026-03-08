@@ -65,6 +65,11 @@ def _build_split(matrix: Any, y: np.ndarray, train_idx: np.ndarray, test_idx: np
     )
 
 
+def _clip_log_predictions(y_pred_log: np.ndarray, y_train_log: np.ndarray) -> np.ndarray:
+    max_train_log = float(np.max(y_train_log))
+    return np.clip(y_pred_log, a_min=0.0, a_max=max_train_log + 1.0)
+
+
 def _fit_classification_models(
     features: dict[str, Any], train_idx: np.ndarray, test_idx: np.ndarray, random_state: int
 ) -> dict[str, Any]:
@@ -101,34 +106,38 @@ def _fit_classification_models(
             "best_params": search.best_params_,
         }
 
-    split_sbert = _build_split(features["metadata_sbert"], y_class, train_idx, test_idx)
-    pos_weight = (split_sbert.y_train == 0).sum() / max((split_sbert.y_train == 1).sum(), 1)
-    xgb_search = GridSearchCV(
-        estimator=XGBClassifier(
-            objective="binary:logistic",
-            eval_metric="logloss",
-            random_state=random_state,
-            scale_pos_weight=float(pos_weight),
-        ),
-        param_grid={
-            "max_depth": [4, 6],
-            "n_estimators": [150, 250],
-            "learning_rate": [0.05, 0.1],
-        },
-        scoring="roc_auc",
-        cv=cv,
-        n_jobs=-1,
-    )
-    xgb_search.fit(split_sbert.x_train, split_sbert.y_train)
-    xgb_cls = xgb_search.best_estimator_
+    for feature_name in ("metadata_tfidf", "metadata_sbert"):
+        split = _build_split(features[feature_name], y_class, train_idx, test_idx)
+        pos_weight = (split.y_train == 0).sum() / max((split.y_train == 1).sum(), 1)
+        xgb_search = GridSearchCV(
+            estimator=XGBClassifier(
+                objective="binary:logistic",
+                eval_metric="logloss",
+                random_state=random_state,
+                scale_pos_weight=float(pos_weight),
+            ),
+            param_grid={
+                "max_depth": [4, 6],
+                "n_estimators": [150, 250],
+                "learning_rate": [0.05, 0.1],
+                "min_child_weight": [1, 3],
+                "reg_alpha": [0.0, 0.5],
+            },
+            scoring="roc_auc",
+            cv=cv,
+            n_jobs=-1,
+        )
+        xgb_search.fit(split.x_train, split.y_train)
+        xgb_cls = xgb_search.best_estimator_
 
-    models["xgb_classifier_metadata_sbert"] = xgb_cls
-    predictions["xgb_classifier_metadata_sbert"] = {
-        "y_true": split_sbert.y_test,
-        "y_pred": xgb_cls.predict(split_sbert.x_test),
-        "y_score": xgb_cls.predict_proba(split_sbert.x_test)[:, 1],
-        "best_params": xgb_search.best_params_,
-    }
+        model_name = f"xgb_classifier_{feature_name}"
+        models[model_name] = xgb_cls
+        predictions[model_name] = {
+            "y_true": split.y_test,
+            "y_pred": xgb_cls.predict(split.x_test),
+            "y_score": xgb_cls.predict_proba(split.x_test)[:, 1],
+            "best_params": xgb_search.best_params_,
+        }
     return {"models": models, "predictions": predictions}
 
 
@@ -144,7 +153,10 @@ def _fit_regression_models(
     split_meta_log = _build_split(features["metadata_only"], y_reg_log, train_idx, test_idx)
     linear = LinearRegression()
     linear.fit(split_meta_log.x_train, split_meta_log.y_train)
-    linear_pred_log = linear.predict(split_meta_log.x_test)
+    linear_pred_log = _clip_log_predictions(
+        linear.predict(split_meta_log.x_test),
+        split_meta_log.y_train,
+    )
     models["linear_metadata_only"] = linear
     predictions["linear_metadata_only"] = {
         "y_true_log": split_meta_log.y_test,
@@ -164,7 +176,10 @@ def _fit_regression_models(
         )
         ridge_search.fit(split.x_train, split.y_train)
         ridge = ridge_search.best_estimator_
-        ridge_pred_log = ridge.predict(split.x_test)
+        ridge_pred_log = _clip_log_predictions(
+            ridge.predict(split.x_test),
+            split.y_train,
+        )
         model_name = f"ridge_{feature_name}"
         models[model_name] = ridge
         predictions[model_name] = {
@@ -176,32 +191,55 @@ def _fit_regression_models(
         }
 
     split_sbert = _build_split(features["metadata_sbert"], y_reg_log, train_idx, test_idx)
-    xgb_search = GridSearchCV(
-        estimator=XGBRegressor(
-            objective="reg:squarederror",
-            random_state=random_state,
+    xgb_variants = (
+        (
+            "xgb_regressor_metadata_sbert",
+            "reg:squarederror",
+            {
+                "max_depth": [3, 5, 7],
+                "n_estimators": [200, 400],
+                "learning_rate": [0.01, 0.05, 0.1],
+                "subsample": [0.8, 1.0],
+            },
         ),
-        param_grid={
-            "max_depth": [3, 5, 7],
-            "n_estimators": [200, 400],
-            "learning_rate": [0.01, 0.05, 0.1],
-            "subsample": [0.8, 1.0],
-        },
-        scoring="r2",
-        cv=cv,
-        n_jobs=-1,
+        (
+            "xgb_huber_regressor_metadata_sbert",
+            "reg:pseudohubererror",
+            {
+                "max_depth": [2, 3, 4],
+                "n_estimators": [100, 200],
+                "learning_rate": [0.01, 0.03],
+                "subsample": [0.7, 0.9],
+                "min_child_weight": [5, 10],
+                "reg_lambda": [5.0, 10.0],
+            },
+        ),
     )
-    xgb_search.fit(split_sbert.x_train, split_sbert.y_train)
-    xgb_reg = xgb_search.best_estimator_
-    xgb_pred_log = xgb_reg.predict(split_sbert.x_test)
-    models["xgb_regressor_metadata_sbert"] = xgb_reg
-    predictions["xgb_regressor_metadata_sbert"] = {
-        "y_true_log": split_sbert.y_test,
-        "y_pred_log": xgb_pred_log,
-        "y_true": y_reg[test_idx],
-        "y_pred": np.clip(np.expm1(xgb_pred_log), a_min=0.0, a_max=None),
-        "best_params": xgb_search.best_params_,
-    }
+    for model_name, objective, param_grid in xgb_variants:
+        xgb_search = GridSearchCV(
+            estimator=XGBRegressor(
+                objective=objective,
+                random_state=random_state,
+            ),
+            param_grid=param_grid,
+            scoring="r2",
+            cv=cv,
+            n_jobs=-1,
+        )
+        xgb_search.fit(split_sbert.x_train, split_sbert.y_train)
+        xgb_reg = xgb_search.best_estimator_
+        xgb_pred_log = _clip_log_predictions(
+            xgb_reg.predict(split_sbert.x_test),
+            split_sbert.y_train,
+        )
+        models[model_name] = xgb_reg
+        predictions[model_name] = {
+            "y_true_log": split_sbert.y_test,
+            "y_pred_log": xgb_pred_log,
+            "y_true": y_reg[test_idx],
+            "y_pred": np.clip(np.expm1(xgb_pred_log), a_min=0.0, a_max=None),
+            "best_params": xgb_search.best_params_,
+        }
     return {"models": models, "predictions": predictions}
 
 
